@@ -1,0 +1,6 @@
+{
+  "name": "迹",
+  "description": "一款现代化的日历打卡与习惯追踪应用，支持补签、撤销、日志记录、数据备份及WebDAV云同步。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
