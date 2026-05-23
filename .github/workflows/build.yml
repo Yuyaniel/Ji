@@ -1,6 +1,8 @@
 name: Build
 
 on:
+  push:
+    branches: [main, master]
   # PR 自动触发检查（跑测试 + Debug 构建）
   pull_request:
     types:
@@ -180,7 +182,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           archive: false
-          name: Android_APK_${{ github.event.inputs.build_type }}
+          name: Android_APK_${{ github.event.inputs.build_type || 'release' }}
           path: Zenith_android_*.apk
 
       # 手动触发 + 指定了 tag 时，自动创建 Release
