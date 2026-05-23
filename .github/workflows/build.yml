@@ -3,15 +3,14 @@ name: Build
 on:
   push:
     branches: [main, master]
-  # PR 自动触发检查（跑测试 + Debug 构建）
   pull_request:
+    branches: [main, master]
     types:
       - opened
       - synchronize
       - reopened
     paths-ignore:
       - "**.md"
-  # 手动触发，支持 Release 构建、版本号覆盖、打 Tag Release
   workflow_dispatch:
     inputs:
       build_type:
@@ -22,16 +21,6 @@ on:
         options:
           - debug
           - release
-      version_name:
-        description: "自定义版本名（留空使用 build.gradle.kts 默认值）"
-        required: false
-        default: ""
-        type: string
-      version_code:
-        description: "自定义版本号（0 表示使用 build.gradle.kts 默认值）"
-        required: false
-        default: 0
-        type: number
       tag:
         description: "Git 标签名（填写则自动创建 GitHub Release）"
         required: false
@@ -39,14 +28,17 @@ on:
         type: string
 
 jobs:
-  test:
-    name: 单元测试
-    if: github.event_name == 'pull_request'
+  build:
+    name: 构建 APK
     runs-on: ubuntu-latest
+    permissions: write-all
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: "zulu"
@@ -56,79 +48,28 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
-          cache-read-only: true
 
-      # Secrets Gradle Plugin 需要 .env 文件才能通过配置阶段
-      - name: Prepare .env for build
+      - name: Prepare .env
         run: echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY || 'placeholder' }}" > .env
 
-      - name: Run unit tests
-        run: gradle test
-
-  build:
-    name: 构建 APK
-    runs-on: ubuntu-latest
-    permissions: write-all
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: "zulu"
-          java-version: "17"
-
-      - name: Setup Gradle with cache
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.3.1"
-          cache-read-only: ${{ github.event_name == 'pull_request' }}
-
-      - name: Prepare .env for build
-        run: echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY || 'placeholder' }}" > .env
-
-      # Release 构建时注入签名密钥（需先在 GitHub Secrets 中配置）
-      - name: Decode signing key
-        if: github.event.inputs.build_type == 'release'
-        env:
-          KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
+      - name: Write release key
+        if: github.event_name == 'workflow_dispatch'
         run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
-            echo "Signing key restored."
-          else
-            echo "No SIGN_KEYSTORE_BASE64 secret found. Build will use debug signing."
+          if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 --decode > my-upload-key.jks
           fi
 
       - name: Generate debug keystore
         run: |
-          if [ ! -f debug.keystore ]; then
-            keytool -genkey -v \
-              -keystore debug.keystore \
-              -alias androiddebugkey \
-              -storepass android \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
-      # 手动覆盖 versionName
-      - name: Override versionName
-        if: github.event.inputs.version_name != ''
-        shell: pwsh
-        run: |
-          (Get-Content app/build.gradle.kts) -replace 'versionName\s*=\s*"[^"]*"', 'versionName = "${{ github.event.inputs.version_name }}"' | Set-Content app/build.gradle.kts
-
-      # 手动覆盖 versionCode
-      - name: Override versionCode
-        if: github.event.inputs.version_code != 0
-        shell: pwsh
-        run: |
-          (Get-Content app/build.gradle.kts) -replace 'versionCode\s*=\s*\d+', 'versionCode = ${{ github.event.inputs.version_code }}' | Set-Content app/build.gradle.kts
+          keytool -genkey -v \
+            -keystore debug.keystore \
+            -alias androiddebugkey \
+            -storepass android \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
 
       - name: Build APK
         env:
@@ -142,54 +83,23 @@ jobs:
             gradle assembleDebug
           fi
 
-      - name: Extract version info
-        shell: pwsh
+      - name: Extract version
+        shell: bash
         run: |
-          $content = Get-Content app/build.gradle.kts -Raw
-          if ($content -match 'versionName\s*=\s*"([^"]+)"') {
-            $ver = $matches[1]
-          } else { $ver = "unknown" }
-          if ($content -match 'versionCode\s*=\s*(\d+)') {
-            $code = $matches[1]
-          } else { $code = "0" }
-          Add-Content -Path $env:GITHUB_ENV -Value "VERSION=$ver"
-          Add-Content -Path $env:GITHUB_ENV -Value "VERSION_CODE=$code"
+          ver=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          echo "VERSION=${ver}" >> $GITHUB_ENV
 
-      - name: Rename APK
-        shell: pwsh
-        run: |
-          $buildType = "${{ github.event.inputs.build_type }}"
-          if ([string]::IsNullOrEmpty($buildType) -or $buildType -eq "release") {
-            $suffix = "release"
-            $srcDir = "build/outputs/apk/release"
-          } else {
-            $suffix = "debug"
-            $srcDir = "build/outputs/apk/debug"
-          }
-          $apks = Get-ChildItem "$srcDir/*.apk" -ErrorAction SilentlyContinue
-          if ($apks.Count -gt 0) {
-            $apk = $apks[0]
-            $newName = "Zenith_android_${{ env.VERSION }}_${suffix}.apk"
-            Move-Item $apk.FullName $newName -Force
-            Add-Content -Path $env:GITHUB_ENV -Value "APK_PATH=$newName"
-            Write-Host "APK renamed to: $newName"
-          } else {
-            Write-Host "No APK found in $srcDir"
-            Add-Content -Path $env:GITHUB_ENV -Value "APK_PATH="
-          }
-
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
           archive: false
-          name: Android_APK_${{ github.event.inputs.build_type || 'release' }}
-          path: Zenith_android_*.apk
+          name: app-${{ env.VERSION }}
+          path: app/build/outputs/apk/*/app-*.apk
 
-      # 手动触发 + 指定了 tag 时，自动创建 Release
       - name: Create GitHub Release
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag }}
           name: ${{ github.event.inputs.tag }}
-          files: Zenith_android_*.apk
+          files: app/build/outputs/apk/*/app-*.apk
