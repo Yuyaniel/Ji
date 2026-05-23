@@ -97,7 +97,21 @@ jobs:
             echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
             echo "Signing key restored."
           else
-            echo "No SIGN_KEYSTORE_BASE64 secret found. Build will use unsigned debug key."
+            echo "No SIGN_KEYSTORE_BASE64 secret found. Build will use debug signing."
+          fi
+
+      - name: Generate debug keystore
+        run: |
+          if [ ! -f debug.keystore ]; then
+            keytool -genkey -v \
+              -keystore debug.keystore \
+              -alias androiddebugkey \
+              -storepass android \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       # 手动覆盖 versionName
